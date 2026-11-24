@@ -1,3 +1,5 @@
 "foldername/" 
 "sessions/" 
 ladderassay/
+__pycache__/
+*.pyc
