@@ -11,7 +11,10 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from pypylon import pylon
 
 from config import (
-    CAMERA_EXPOSURE_US,
+    CAMERA_FPS,
+    PRETRIGGER_SECONDS,
+    CAMERA1_EXPOSURE_US,
+    CAMERA2_EXPOSURE_US,
     CAMERA_MAX_BUFFERS,
     PREVIEW_FPS
 )
@@ -47,8 +50,8 @@ class CameraManager(QThread):
 
     def __init__(
             self,
-            fps=150,
-            pretrigger_seconds=1):
+            fps=CAMERA_FPS,
+            pretrigger_seconds=PRETRIGGER_SECONDS):
 
         super().__init__()
 
@@ -93,6 +96,90 @@ class CameraManager(QThread):
 
         self.native_mono8 = [False, False]
 
+        # Exposure (us) per camera. GUI edits are stored here and applied
+        # by the acquisition thread, which owns the cameras.
+        self.exposure_us = [
+            CAMERA1_EXPOSURE_US,
+            CAMERA2_EXPOSURE_US
+        ]
+
+        self._exposure_dirty = [False, False]
+
+        self._pending_fps = None
+
+    def set_fps(self, fps):
+        """Thread-safe: applied by the acquisition thread. Not to be
+        called during a recording (the video files use one rate)."""
+
+        self._pending_fps = fps
+
+    def _apply_fps(self, fps):
+
+        for i, cam in enumerate(self.cams):
+
+            if cam is None:
+                continue
+
+            try:
+
+                cam.AcquisitionFrameRateEnable.Value = True
+
+                cam.AcquisitionFrameRate.Value = fps
+
+            except Exception as e:
+
+                self.status_signal.emit(
+                    f"Camera {i + 1}: could not set frame rate ({e})"
+                )
+
+        self.fps = fps
+
+        self.buffer_length = int(
+            fps * self.pretrigger_seconds
+        )
+
+        with self.buffer_lock:
+
+            self.buffers = [
+                deque(buf, maxlen=self.buffer_length)
+                for buf in self.buffers
+            ]
+
+        # The exposure limit follows the frame period
+        self._exposure_dirty = [True, True]
+
+    def set_exposure(self, index, exposure_us):
+        """Thread-safe: takes effect on the next acquisition-loop pass."""
+
+        self.exposure_us[index] = exposure_us
+
+        self._exposure_dirty[index] = True
+
+    def _apply_exposure(self, index):
+
+        exposure_us = min(
+            self.exposure_us[index],
+            0.9 * 1e6 / self.fps
+        )
+
+        cam = self.cams[index]
+
+        try:
+
+            cam.ExposureTime.Value = exposure_us
+
+        except Exception:
+
+            try:
+
+                cam.ExposureTimeAbs.Value = exposure_us
+
+            except Exception as e:
+
+                self.status_signal.emit(
+                    f"Camera {index + 1}: could not set exposure ({e})"
+                )
+
     # --------------------------------------------------
     # Camera Initialization
     # --------------------------------------------------
@@ -127,7 +214,7 @@ class CameraManager(QThread):
 
             self.cams[i] = cam
 
-            self.configure_camera(cam, f"Camera {i + 1}")
+            self.configure_camera(cam, f"Camera {i + 1}", i)
 
             # Mono8 cameras are used as-is (no conversion, 1/3 the
             # memory and CPU of BGR). Anything else is converted:
@@ -189,7 +276,7 @@ class CameraManager(QThread):
     # Configure camera
     # --------------------------------------------------
 
-    def configure_camera(self, cam, name):
+    def configure_camera(self, cam, name, index):
 
         # Offsets first: the camera keeps its settings between runs and
         # Width.Max / Height.Max shrink while an offset is non-zero
@@ -222,26 +309,11 @@ class CameraManager(QThread):
                 f"{name}: could not disable auto exposure ({e})"
             )
 
-        exposure_us = min(
-            CAMERA_EXPOSURE_US,
-            0.9 * 1e6 / self.fps
-        )
+        self.cams[index] = cam
 
-        try:
+        self._apply_exposure(index)
 
-            cam.ExposureTime.Value = exposure_us
-
-        except Exception:
-
-            try:
-
-                cam.ExposureTimeAbs.Value = exposure_us
-
-            except Exception as e:
-
-                self.status_signal.emit(
-                    f"{name}: could not set exposure ({e})"
-                )
+        self._exposure_dirty[index] = False
 
         try:
 
@@ -287,7 +359,8 @@ class CameraManager(QThread):
                 list(self.buffers[0]),
                 list(self.buffers[1]),
                 start_voltage=start_voltage,
-                active_cameras=self.active
+                active_cameras=self.active,
+                fps=self.fps
             )
 
             self.recorder = recorder
@@ -440,6 +513,20 @@ class CameraManager(QThread):
 
                 if failed:
                     break
+
+                if self._pending_fps is not None:
+
+                    fps, self._pending_fps = self._pending_fps, None
+
+                    self._apply_fps(fps)
+
+                for i in active:
+
+                    if self._exposure_dirty[i]:
+
+                        self._exposure_dirty[i] = False
+
+                        self._apply_exposure(i)
 
                 # A frame from one camera waits for its partner
                 # instead of being discarded, so the pair stays aligned

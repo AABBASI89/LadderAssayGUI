@@ -18,10 +18,25 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QMessageBox,
     QGroupBox,
-    QDoubleSpinBox
+    QDoubleSpinBox,
+    QSpinBox,
+    QLineEdit,
+    QFileDialog
 )
 
 from config import (
+    SESSION_BASE_FOLDER,
+    SESSION_ROOT,
+    CAMERA1_EXPOSURE_US,
+    CAMERA2_EXPOSURE_US,
+    EXPOSURE_MIN_US,
+    EXPOSURE_MAX_US,
+    CAMERA_FPS,
+    FPS_MIN,
+    FPS_MAX,
+    max_exposure_us,
+    sessions_root,
+    save_settings,
     STATUS_IDLE,
     STATUS_PREVIEW,
     STATUS_ARMED,
@@ -69,7 +84,8 @@ class MainWindow(QWidget):
         # -----------------------------------
         # Logging
         # -----------------------------------
-        self.logger = SessionLogger()
+        self.session_base_folder = SESSION_BASE_FOLDER
+        self.logger = SessionLogger(SESSION_ROOT)
 
         # -----------------------------------
         # Recorder
@@ -404,6 +420,75 @@ class MainWindow(QWidget):
         threshold_layout.addStretch()
         threshold_group.setLayout(threshold_layout)
 
+        # ----------------------------
+        # Camera exposure (editable during preview)
+        # ----------------------------
+        exposure_group = QGroupBox(
+            "Camera exposure and frame rate (applied immediately, "
+            "saved for next launch)"
+        )
+        exposure_layout = QHBoxLayout()
+
+        self.exposure1_spin = self.make_exposure_spin(
+            CAMERA1_EXPOSURE_US
+        )
+        self.exposure2_spin = self.make_exposure_spin(
+            CAMERA2_EXPOSURE_US
+        )
+        self.exposure1_spin.valueChanged.connect(
+            lambda value: self.exposure_changed(0, value)
+        )
+        self.exposure2_spin.valueChanged.connect(
+            lambda value: self.exposure_changed(1, value)
+        )
+
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(FPS_MIN, FPS_MAX)
+        self.fps_spin.setSuffix(" fps")
+        self.fps_spin.setValue(CAMERA_FPS)
+        self.fps_spin.setToolTip(
+            "Exposure is limited to 90% of the frame period "
+            "(7500 us needs 120 fps or less). Cannot be changed "
+            "while recording."
+        )
+        self.update_exposure_limit()
+        self.fps_spin.valueChanged.connect(
+            self.fps_changed
+        )
+
+        exposure_layout.addWidget(QLabel("Camera 1"))
+        exposure_layout.addWidget(self.exposure1_spin)
+        exposure_layout.addSpacing(30)
+        exposure_layout.addWidget(QLabel("Camera 2"))
+        exposure_layout.addWidget(self.exposure2_spin)
+        exposure_layout.addSpacing(30)
+        exposure_layout.addWidget(QLabel("Frame rate"))
+        exposure_layout.addWidget(self.fps_spin)
+        exposure_layout.addStretch()
+        exposure_group.setLayout(exposure_layout)
+
+        # ----------------------------
+        # Save location
+        # ----------------------------
+        folder_group = QGroupBox(
+            "Save location (a 'sessions' folder is created inside it)"
+        )
+        folder_layout = QHBoxLayout()
+
+        self.folder_edit = QLineEdit(
+            str(self.session_base_folder)
+        )
+        self.folder_edit.setReadOnly(True)
+
+        self.browse_button = QPushButton("Browse...")
+        self.browse_button.clicked.connect(
+            self.browse_folder
+        )
+
+        folder_layout.addWidget(self.folder_edit)
+        folder_layout.addWidget(self.browse_button)
+        folder_group.setLayout(folder_layout)
+
         # Last hardware error / warning (full text in tooltip and log)
         self.error_label = QLabel("")
         self.error_label.setStyleSheet(
@@ -467,6 +552,8 @@ class MainWindow(QWidget):
         layout.addLayout(camera_layout)
         layout.addWidget(status_group)
         layout.addWidget(threshold_group)
+        layout.addWidget(exposure_group)
+        layout.addWidget(folder_group)
         layout.addWidget(self.error_label)
         layout.addLayout(button_layout)
         layout.addWidget(hardware_group)
@@ -492,6 +579,144 @@ class MainWindow(QWidget):
         spin.setValue(value)
 
         return spin
+
+    @staticmethod
+    def make_exposure_spin(value):
+
+        spin = QSpinBox()
+
+        spin.setRange(
+            EXPOSURE_MIN_US,
+            EXPOSURE_MAX_US
+        )
+
+        spin.setSingleStep(100)
+
+        spin.setSuffix(" µs")
+
+        spin.setValue(value)
+
+        return spin
+
+    # ==================================================
+    # Exposure
+    # ==================================================
+
+    def exposure_changed(self, index, value):
+        """Applies the new exposure to the running camera and saves it
+        in the settings file."""
+
+        self.camera_manager.set_exposure(index, value)
+
+        save_settings(**{f"cam{index + 1}_exposure_us": value})
+
+        self.logger.log_event(
+            "ExposureChanged",
+            details=f"Camera{index + 1} exposure = {value} us"
+        )
+
+    def update_exposure_limit(self):
+        """Exposure can be at most 90% of the frame period."""
+
+        limit = max_exposure_us(self.fps_spin.value())
+
+        # Signals blocked so that a value clamped by the new limit is
+        # not written over the saved setting; the camera applies the
+        # same limit itself.
+        for spin in (self.exposure1_spin, self.exposure2_spin):
+
+            spin.blockSignals(True)
+            spin.setMaximum(limit)
+            spin.blockSignals(False)
+
+    def fps_changed(self, value):
+
+        if self.recording_active:
+
+            # Video files use one rate; put the spin back
+            self.fps_spin.blockSignals(True)
+            self.fps_spin.setValue(self.camera_manager.fps)
+            self.fps_spin.blockSignals(False)
+
+            self.show_info(
+                "Frame rate cannot be changed while recording."
+            )
+
+            return
+
+        self.update_exposure_limit()
+
+        self.camera_manager.set_fps(value)
+
+        save_settings(camera_fps=value)
+
+        self.logger.log_event(
+            "FpsChanged",
+            details=f"Frame rate = {value} fps"
+        )
+
+    # ==================================================
+    # Save location
+    # ==================================================
+
+    def browse_folder(self):
+        """Lets the user pick where the 'sessions' folder lives. A new
+        session is started there (counts and crossings restart)."""
+
+        if (
+            self.recording_active
+            or self.status == STATUS_ARMED
+        ):
+
+            QMessageBox.warning(
+                self,
+                "Save location",
+                "Stop recording before changing the save location."
+            )
+
+            return
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select folder for the sessions folder",
+            str(self.session_base_folder)
+        )
+
+        if not folder:
+            return
+
+        try:
+
+            root = sessions_root(folder)
+
+            self.logger.change_root(root)
+
+        except OSError as e:
+
+            self.show_error(
+                f"Could not use folder {folder}: {e}"
+            )
+
+            return
+
+        self.session_base_folder = folder
+
+        self.folder_edit.setText(folder)
+
+        save_settings(session_base_folder=folder)
+
+        # New session: restart the per-session counters
+        self.tracker = CrossingTracker()
+        self.beam1_count = 0
+        self.beam2_count = 0
+        self.beam1_label.setText("0")
+        self.beam2_label.setText("0")
+        self.trial_label.setText("0")
+        self.update_crossing_labels()
+
+        self.session_label.setText(
+            str(self.logger.get_session_folder())
+        )
 
     # ==================================================
     # Status

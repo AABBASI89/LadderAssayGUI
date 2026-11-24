@@ -1,5 +1,6 @@
 # config.py
 
+import json
 from pathlib import Path
 
 # ==========================================================
@@ -15,9 +16,27 @@ CAMERA_HEIGHT = 1216
 
 NUM_CAMERAS = 2
 
-# Exposure must be shorter than one frame period (1/150 s = 6.67 ms).
-# It is clamped to 90% of the frame period at startup.
-CAMERA_EXPOSURE_US = 4000
+# Default frame rate / exposure for a first run; both can be changed in
+# the GUI and are then saved. Exposure must be shorter than one frame
+# period, so it is clamped to 90% of it (6000 us at 150 fps).
+CAMERA_EXPOSURE_US = 7500
+
+# Per-camera exposure limits shown in the GUI (microseconds)
+EXPOSURE_MIN_US = 50
+EXPOSURE_MAX_US = 7500
+
+# Frame-rate limits shown in the GUI (sensor maximum is 155 fps)
+FPS_MIN = 10
+FPS_MAX = 150
+
+# Exposure is also limited to 90% of the frame period, so 7500 us needs
+# a frame rate of 120 fps or less.
+def max_exposure_us(fps):
+
+    return max(
+        EXPOSURE_MIN_US,
+        min(EXPOSURE_MAX_US, int(0.9 * 1e6 / fps))
+    )
 
 # Driver-side buffers per camera (OneByOne grabbing)
 CAMERA_MAX_BUFFERS = 300
@@ -133,12 +152,101 @@ PLOT_REFRESH_MS = 50
 
 ROOT_FOLDER = Path.cwd()
 
-SESSION_ROOT = ROOT_FOLDER / "sessions"
+# Settings edited in the GUI are stored here and reloaded at launch
+SETTINGS_FILE = ROOT_FOLDER / "settings.json"
 
-SESSION_ROOT.mkdir(
-    parents=True,
-    exist_ok=True
+
+def load_settings():
+    """Returns the saved GUI settings (empty if none / unreadable)."""
+
+    try:
+
+        with open(SETTINGS_FILE, "r") as f:
+            data = json.load(f)
+
+        return data if isinstance(data, dict) else {}
+
+    except (OSError, ValueError):
+
+        return {}
+
+
+def save_settings(**changes):
+    """Merges the given values into the settings file."""
+
+    data = load_settings()
+
+    data.update(changes)
+
+    try:
+
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+
+    except OSError as e:
+
+        print(f"Could not save settings: {e}")
+
+
+def sessions_root(base_folder):
+    """The 'sessions' folder inside the chosen folder (created if
+    missing)."""
+
+    root = Path(base_folder) / "sessions"
+
+    root.mkdir(parents=True, exist_ok=True)
+
+    return root
+
+
+_settings = load_settings()
+
+# Frame rate last set in the GUI overrides the default above
+try:
+
+    CAMERA_FPS = max(
+        FPS_MIN,
+        min(FPS_MAX, int(_settings.get("camera_fps", CAMERA_FPS)))
+    )
+
+except (TypeError, ValueError):
+
+    pass
+
+PRETRIGGER_FRAMES = int(
+    CAMERA_FPS * PRETRIGGER_SECONDS
 )
+
+
+def _saved_exposure(key):
+
+    try:
+        value = int(_settings.get(key, CAMERA_EXPOSURE_US))
+    except (TypeError, ValueError):
+        value = CAMERA_EXPOSURE_US
+
+    return max(EXPOSURE_MIN_US, min(EXPOSURE_MAX_US, value))
+
+
+# Startup exposures (us), last values set in the GUI
+CAMERA1_EXPOSURE_US = _saved_exposure("cam1_exposure_us")
+CAMERA2_EXPOSURE_US = _saved_exposure("cam2_exposure_us")
+
+# Folder chosen with the Browse button; the sessions folder lives in it
+SESSION_BASE_FOLDER = Path(
+    _settings.get("session_base_folder", ROOT_FOLDER)
+)
+
+try:
+
+    SESSION_ROOT = sessions_root(SESSION_BASE_FOLDER)
+
+except OSError:
+
+    # Saved folder no longer available (e.g. unplugged drive)
+    SESSION_BASE_FOLDER = ROOT_FOLDER
+
+    SESSION_ROOT = sessions_root(ROOT_FOLDER)
 
 # ==========================================================
 # GUI

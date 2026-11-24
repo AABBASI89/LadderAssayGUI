@@ -76,7 +76,8 @@ class Recorder:
             buffer_cam1,
             buffer_cam2,
             start_voltage=None,
-            active_cameras=(True, True)
+            active_cameras=(True, True),
+            fps=CAMERA_FPS
     ):
 
         with self._lock:
@@ -124,7 +125,7 @@ class Recorder:
                 trial.writers[i] = cv2.VideoWriter(
                     str(trial_folder / f"cam{i + 1}.avi"),
                     fourcc,
-                    CAMERA_FPS,
+                    fps,
                     (w, h),
                     is_color
                 )

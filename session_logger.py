@@ -49,7 +49,9 @@ class SessionLogger:
             ...
     """
 
-    def __init__(self):
+    def __init__(self, session_root=SESSION_ROOT):
+
+        self.session_root = Path(session_root)
 
         self.session_folder = None
 
@@ -78,7 +80,7 @@ class SessionLogger:
         )
 
         self.session_folder = (
-            SESSION_ROOT /
+            self.session_root /
             f"Session_{timestamp}"
         )
 
@@ -378,6 +380,27 @@ class SessionLogger:
             # ~0.5 s of data at the 5 ms poll rate
             if self._sensor_rows % 100 == 0:
                 self._sensor_handle.flush()
+
+    def change_root(self, session_root):
+        """Closes the current session and starts a new one in
+        session_root (created if missing)."""
+
+        with self._lock:
+
+            self.session_root = Path(session_root)
+
+            self.session_root.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+            self.close()
+
+            self.current_trial = 0
+
+            self._sensor_rows = 0
+
+            self.create_session()
 
     def close(self):
 
