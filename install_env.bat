@@ -16,22 +16,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Creating virtual environment in .venv ...
-    python -m venv .venv
+if not exist "ladderassay\Scripts\python.exe" (
+    echo Creating virtual environment in ladderassay ...
+    python -m venv ladderassay
     if errorlevel 1 (
         echo [ERROR] Failed to create virtual environment.
         pause
         exit /b 1
     )
 ) else (
-    echo Virtual environment .venv already exists - reusing it.
+    echo Virtual environment ladderassay already exists - reusing it.
 )
 
 echo.
 echo Installing Python packages ...
-".venv\Scripts\python.exe" -m pip install --upgrade pip
-".venv\Scripts\python.exe" -m pip install PyQt5 pyqtgraph numpy opencv-python pypylon pyfirmata
+"ladderassay\Scripts\python.exe" -m pip install --upgrade pip
+"ladderassay\Scripts\python.exe" -m pip install PyQt5 pyqtgraph numpy opencv-python pypylon pyfirmata
 if errorlevel 1 (
     echo [ERROR] Package installation failed. See messages above.
     pause
@@ -64,7 +64,7 @@ echo  since it will hold the COM port.
 echo ============================================================
 echo.
 echo To run the GUI:
-echo     .venv\Scripts\python.exe main.py
+echo     ladderassay\Scripts\python.exe main.py
 echo.
 pause
 endlocal
